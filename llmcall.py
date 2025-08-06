@@ -1,5 +1,6 @@
 import urllib.request
 import json 
+from getschema import gettables
 
 # def query_model(
 #     prompt,
@@ -114,7 +115,7 @@ def clean_sql_query(sql_query: str) -> str:
 def response(user_input :str ):
     if not user_input or not user_input.strip():
         raise ValueError("User input cannot be empty")
-    prompt=f"You are an expert SQL query generator.You will receive user intent as a string stored in a variable called user_input.Your task is to generate a single-line SQL query that accurately reflects the intent.Only return the SQL command.Do not add explanations or comments.Assume a general relational database schema unless specified in the input. If any table or column is not explicitly mentioned, make reasonable assumptions.Use simple, standard SQL (MySQL/PostgreSQL-compatible).user_input :{user_input}"
+    prompt=f"You are an expert SQL query generator.You will receive user intent as a string stored in a variable called user_input.Your task is to generate a single-line SQL query that accurately reflects the intent.Only return the SQL command.Do not add explanations or comments.Assume a general relational database schema unless specified in the input. If any table or column is not explicitly mentioned, make reasonable assumptions.Use simple, standard SQL (MySQL/PostgreSQL-compatible).user_input :{user_input}. Also note; the tables are:{gettables()}"
     # model="llama3"
     raw_sql=query_model(prompt=prompt)
     clean_sql=clean_sql_query(raw_sql)
