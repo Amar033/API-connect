@@ -1,11 +1,11 @@
-from dotenv import main
+from dotenv import load_dotenv
 import os 
 import logging
 import psycopg2 
 from psycopg2 import OperationalError
 
 
-main.load_dotenv()
+load_dotenv()
 
 DB_CONFIG = {
     'host': os.getenv('PG_HOST'),
@@ -21,18 +21,24 @@ logger = logging.getLogger(__name__)
 
 def get_db_connection(config:dict =DB_CONFIG):
     """Create a new database connection"""
+    if config is None:
+        config =DB_CONFIG
     try:
         conn = psycopg2.connect(**config)
         logger.info("Database connection successful")
         return conn
     except OperationalError as e:
         logger.error(f"Database connection failed: {e}")
+        return None
 
 
 def test_db_connection():
     """Test if database connection works"""
     try:
         conn = get_db_connection()
+        if conn ==None:
+            return False, "Connection Failed"
+        
         with conn.cursor() as cur:
             cur.execute("SELECT 1;")
             result = cur.fetchone()
@@ -43,6 +49,8 @@ def test_db_connection():
 
 def get_schema(conn):
     "Retrieve schema"
+    if conn is None:
+        return "Error: No connection provided"
     try:
         with conn.cursor() as cur:
             cur.execute(

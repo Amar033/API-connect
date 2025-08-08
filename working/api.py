@@ -2,7 +2,6 @@ from fastapi import FastAPI, Request, HTTPException
 from llmcall import response
 import psycopg2
 from psycopg2 import OperationalError
-from pydantic import BaseModel
 import logging
 from dotenv import main
 import os 
