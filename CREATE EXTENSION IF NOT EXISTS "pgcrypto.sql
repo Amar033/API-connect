@@ -25,3 +25,7 @@ CREATE TABLE external_db_credentials (
 );
 
 
+SELECT * FROM external_db_credentials;
+
+SELECT * FROM users;
+
