@@ -16,7 +16,7 @@ def create_user(db: Session, user: schemas.UserCreate) -> models.User:
         name=user.name,
         email=user.email,
         hashed_password=hashed_password,
-        created_at=datetime.utcnow()
+        created_at=datetime.now()
     )
     db.add(db_user)
     db.commit()

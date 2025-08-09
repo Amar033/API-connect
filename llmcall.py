@@ -1,42 +1,47 @@
-# Updated llmcall.py
-import urllib.request
-import json 
 import re
 from typing import List, Dict, Optional
 from models import ExternalDBCredential
 from getschemas import get_user_database_schemas, format_schema_for_llm, get_external_db_connection, get_sample_data
+import requests
+import json
+import os
+
 
 def query_model(
     prompt,
-    model="llama3",
-    url="http://localhost:11434/api/generate"
+    model="openai/gpt-oss-20b",  # OpenRouter model name
+    url="https://openrouter.ai/api/v1/chat/completions"
 ):
-    """Query the Ollama model"""
-    data = {
-        "model": model,
-        "prompt": prompt,
-        "stream": True,
-        "options": {
-            "seed": 123,
-            "temperature": 0,
-            "num_ctx": 4096  # Increased context for better schema understanding
+    """Query the OpenRouter GPT-OSS-20B model"""
+    try:
+        api_key = os.getenv("OPENROUTER_API_KEY")  # Store API key in env
+        if not api_key:
+            raise ValueError("Missing OPENROUTER_API_KEY environment variable")
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
         }
-    }
-    
-    payload = json.dumps(data).encode("utf-8")
-    request = urllib.request.Request(url, data=payload, method="POST")
-    request.add_header("Content-Type", "application/json")
-    
-    response_data = ""
-    with urllib.request.urlopen(request) as response:
-        while True:
-            line = response.readline().decode("utf-8")
-            if not line:
-                break
-            response_json = json.loads(line)
-            response_data += response_json.get("response", "")
-    
-    return response_data
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are an expert SQL query generator."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0,
+            "max_tokens": 1024
+        }
+
+        response = requests.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+
+        return data["choices"][0]["message"]["content"].strip()
+
+    except Exception as e:
+        return f"Error querying OpenRouter: {str(e)}"
+
 
 def clean_sql_query(sql_query: str) -> str:
     """Clean and validate SQL query from LLM response"""
