@@ -211,7 +211,7 @@ async def ask_question(
             suggestion=suggestion
         )
         
-        set_cache(cache_key,response_payload.dict(),ttl=600)
+        set_cache(cache_key,response_payload.model_dump(),ttl=600)
 
         return  response_payload 
         

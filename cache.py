@@ -1,7 +1,7 @@
 import redis
 import os
 import json
-import time
+from decimal import Decimal
 
 
 '''Initialize redis client'''
@@ -19,4 +19,13 @@ def get_cache(key:str):
 
 def set_cache(key:str, value,ttl:int=3600):
     '''Store the cached values'''
-    redis_client.setex(key,ttl,json.dumps(value))
+    redis_client.setex(key,ttl,json.dumps(value,default=_json_default))
+
+
+
+
+def _json_default(obj):
+    if isinstance(obj, Decimal):
+        return float(obj)
+    raise TypeError(f"Type {type(obj)} not serializable")
+
