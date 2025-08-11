@@ -1,4 +1,3 @@
-# Updated routes/llm.py
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from models import ExternalDBCredential, User
@@ -6,13 +5,18 @@ from database import get_db
 from auth import get_current_user
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
-from llmcall import (  # Import your LLM functions
+from llmcall import ( 
     generate_sql_response,
     execute_sql_query,
     get_user_database_schemas,
     format_schema_for_llm
 )
 import logging
+import hashlib
+from cache import get_cache, set_cache
+
+
+
 
 router = APIRouter(prefix="/llm-chat", tags=["Natural Language Database Chat"])
 
@@ -35,29 +39,34 @@ class DatabaseSummaryResponse(BaseModel):
     total_tables: int
     sample_questions: List[str]
 
-import time
 
-CACHE_TTL = 300  # 5 minutes
-cache_store = {}  # { cache_key: (expiry_timestamp, data) }
 
-def make_cache_key(user_id: int, question: str) -> str:
-    normalized_q = question.strip().lower()
-    return f"user:{user_id}:q:{normalized_q}"
+'''Woks for internal memory cache, not useful if there are many sessions'''
+# CACHE_TTL = 300  # 5 minutes
+# cache_store = {}  # { cache_key: (expiry_timestamp, data) }
 
-def get_cache(key: str):
-    entry = cache_store.get(key)
-    if not entry:
-        return None
-    expiry, value = entry
-    if time.time() > expiry:
-        cache_store.pop(key, None)
-        return None
-    return value
+# def make_cache_key(user_id: int, question: str) -> str:
+#     normalized_q = question.strip().lower()
+#     return f"user:{user_id}:q:{normalized_q}"
 
-def set_cache(key: str, value: dict, ttl: int = CACHE_TTL):
-    cache_store[key] = (time.time() + ttl, value)
+# def get_cache(key: str):
+#     entry = cache_store.get(key)
+#     if not entry:
+#         return None
+#     expiry, value = entry
+#     if time.time() > expiry:
+#         cache_store.pop(key, None)
+#         return None
+#     return value
 
-# Helper Functions (simplified using llmcall.py)
+# def set_cache(key: str, value: dict, ttl: int = CACHE_TTL):
+#     cache_store[key] = (time.time() + ttl, value)
+
+
+
+
+
+
 def get_comprehensive_database_context(credentials: List[ExternalDBCredential]) -> str:
     """Use llmcall's schema functions"""
     try:
@@ -127,21 +136,34 @@ async def ask_question(
             detail="No database connections found."
         )
 
-    # 1️⃣ Check cache first
-    cache_key = make_cache_key(current_user.id, request.question)
-    cached = get_cache(cache_key)
-    if cached:
-        logger.info(f"Cache hit for: {request.question}")
-        return ChatResponse(
-            question=request.question,
-            answer=cached["answer"],
-            sql_used=cached["sql"],
-            data=cached["data"],
-            suggestion=cached["suggestion"]
-        )
+
+
+
+    # internal memory cache
+    # cache_key = make_cache_key(current_user.id, request.question)
+    # cached = get_cache(cache_key)
+    # if cached:
+    #     logger.info(f"Cache hit for: {request.question}")
+    #     return ChatResponse(
+    #         question=request.question,
+    #         answer=cached["answer"],
+    #         sql_used=cached["sql"],
+    #         data=cached["data"],
+    #         suggestion=cached["suggestion"]
+    #     )
+
+    cache_key=hashlib.sha256(f"{current_user.id}: {request.question}".encode()).hexdigest()
+    
+    cached_response=get_cache(cache_key)
+    if cached_response:
+        logger.info(f"Cache hit for {cache_key}")
+        return ChatResponse(**cached_response)
+    
+    logger.info(f"Cache miss for {cache_key}")
+
 
     try:
-        # 2️⃣ Generate SQL
+       
         result = generate_sql_response(
             user_id=current_user.id,
             user_input=request.question,
@@ -156,7 +178,7 @@ async def ask_question(
                 suggestion="Try asking differently."
             )
         
-        # 3️⃣ Execute query
+        
         target_db = next(
             (cred for cred in credentials 
              if cred.name == result["database"] or cred.dbname == result["database"]),
@@ -176,26 +198,22 @@ async def ask_question(
                 error=execution_result["error"]
             )
         
-        # 4️⃣ Format answer
+        
         data = execution_result.get("data", [])
         answer = format_answer(request.question, data, len(data))
         suggestion = get_suggestion_based_on_results(data)
 
-        # 5️⃣ Store in cache
-        set_cache(cache_key, {
-            "answer": answer,
-            "sql": result["sql"],
-            "data": data,
-            "suggestion": suggestion
-        })
-
-        return ChatResponse(
+        response_payload = ChatResponse(
             question=request.question,
             answer=answer,
             sql_used=result["sql"],
             data=data,
             suggestion=suggestion
         )
+        
+        set_cache(cache_key,response_payload.dict(),ttl=600)
+
+        return  response_payload 
         
     except Exception as e:
         logger.error(f"Error in ask_question: {str(e)}", exc_info=True)
