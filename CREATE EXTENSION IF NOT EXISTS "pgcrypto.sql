@@ -29,3 +29,7 @@ SELECT * FROM external_db_credentials;
 
 SELECT * FROM users;
 
+DELETE FROM external_db_credentials WHERE port =5432;
+
+
+
