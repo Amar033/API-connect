@@ -9,7 +9,7 @@ from models import ExternalDBCredential
 
 load_dotenv()
 
-# Local DB config for FastAPI app's database
+
 LOCAL_DB_CONFIG = {
     'host': os.getenv('PG_HOST'),
     'port': os.getenv('PG_PORT'),

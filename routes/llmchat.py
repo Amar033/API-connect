@@ -35,6 +35,28 @@ class DatabaseSummaryResponse(BaseModel):
     total_tables: int
     sample_questions: List[str]
 
+import time
+
+CACHE_TTL = 300  # 5 minutes
+cache_store = {}  # { cache_key: (expiry_timestamp, data) }
+
+def make_cache_key(user_id: int, question: str) -> str:
+    normalized_q = question.strip().lower()
+    return f"user:{user_id}:q:{normalized_q}"
+
+def get_cache(key: str):
+    entry = cache_store.get(key)
+    if not entry:
+        return None
+    expiry, value = entry
+    if time.time() > expiry:
+        cache_store.pop(key, None)
+        return None
+    return value
+
+def set_cache(key: str, value: dict, ttl: int = CACHE_TTL):
+    cache_store[key] = (time.time() + ttl, value)
+
 # Helper Functions (simplified using llmcall.py)
 def get_comprehensive_database_context(credentials: List[ExternalDBCredential]) -> str:
     """Use llmcall's schema functions"""
@@ -95,7 +117,6 @@ async def ask_question(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Main endpoint using llmcall.py functions"""
     credentials = db.query(ExternalDBCredential).filter(
         ExternalDBCredential.user_id == current_user.id
     ).all()
@@ -105,10 +126,24 @@ async def ask_question(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No database connections found."
         )
-    
+
+    # 1️⃣ Check cache first
+    cache_key = make_cache_key(current_user.id, request.question)
+    cached = get_cache(cache_key)
+    if cached:
+        logger.info(f"Cache hit for: {request.question}")
+        return ChatResponse(
+            question=request.question,
+            answer=cached["answer"],
+            sql_used=cached["sql"],
+            data=cached["data"],
+            suggestion=cached["suggestion"]
+        )
+
     try:
-        # Step 1: Generate SQL using llmcall
+        # 2️⃣ Generate SQL
         result = generate_sql_response(
+            user_id=current_user.id,
             user_input=request.question,
             user_db_credentials=credentials
         )
@@ -121,11 +156,11 @@ async def ask_question(
                 suggestion="Try asking differently."
             )
         
-        # Step 2: Execute the query
+        # 3️⃣ Execute query
         target_db = next(
             (cred for cred in credentials 
              if cred.name == result["database"] or cred.dbname == result["database"]),
-            credentials[0]  # fallback
+            credentials[0]
         )
         
         execution_result = execute_sql_query(
@@ -133,7 +168,6 @@ async def ask_question(
             db_credential=target_db
         )
         
-        # Step 3: Format response
         if execution_result.get("error"):
             return ChatResponse(
                 question=request.question,
@@ -142,19 +176,25 @@ async def ask_question(
                 error=execution_result["error"]
             )
         
+        # 4️⃣ Format answer
         data = execution_result.get("data", [])
-        answer = format_answer(
-            question=request.question,
-            data=data,
-            row_count=len(data)
-        )
-        
+        answer = format_answer(request.question, data, len(data))
+        suggestion = get_suggestion_based_on_results(data)
+
+        # 5️⃣ Store in cache
+        set_cache(cache_key, {
+            "answer": answer,
+            "sql": result["sql"],
+            "data": data,
+            "suggestion": suggestion
+        })
+
         return ChatResponse(
             question=request.question,
             answer=answer,
             sql_used=result["sql"],
             data=data,
-            suggestion=get_suggestion_based_on_results(data)
+            suggestion=suggestion
         )
         
     except Exception as e:
@@ -164,7 +204,6 @@ async def ask_question(
             answer="An error occurred.",
             error=str(e)
         )
-
 # Helper functions for response formatting
 def format_answer(question: str, data: list, row_count: int) -> str:
     """Format a user-friendly answer"""

@@ -4,23 +4,87 @@ from models import ExternalDBCredential
 from getschemas import get_user_database_schemas, format_schema_for_llm, get_external_db_connection
 import requests
 import os
+from datetime import datetime, timedelta
+
+# === Simple in-memory context store ===
+# key = user_id, value = list of recent conversation turns
+USER_CONTEXT: Dict[str, List[Dict[str, str]]] = {}
+CONTEXT_EXPIRY_MINUTES = 10  # context expires after inactivity
+
+from functools import lru_cache
+import time
+
+# Simple in-memory cache structure
+_llm_cache = {}  # { (user_id, question.lower().strip()): (timestamp, response) }
+CACHE_TTL = 3600  # seconds (1 hour)
+
+def get_cached_response(user_id: int, question: str):
+    key = (user_id, question.lower().strip())
+    entry = _llm_cache.get(key)
+    if entry:
+        timestamp, response = entry
+        if time.time() - timestamp < CACHE_TTL:
+            return response
+        else:
+            del _llm_cache[key]  # expired
+    return None
+
+def set_cached_response(user_id: int, question: str, response):
+    key = (user_id, question.lower().strip())
+    _llm_cache[key] = (time.time(), response)
 
 
-def query_model(prompt, model="openai/gpt-oss-20b", url="https://openrouter.ai/api/v1/chat/completions"):
-    """Query the OpenRouter GPT-OSS-20B model"""
+def _clean_expired_context():
+    """Remove context for inactive users"""
+    now = datetime.utcnow()
+    expired_users = []
+    for user_id, messages in USER_CONTEXT.items():
+        if messages and 'timestamp' in messages[-1]:
+            last_time = messages[-1]['timestamp']
+            if (now - last_time).total_seconds() > CONTEXT_EXPIRY_MINUTES * 60:
+                expired_users.append(user_id)
+    for uid in expired_users:
+        del USER_CONTEXT[uid]
+
+def _add_to_context(user_id: str, role: str, content: str):
+    """Append message to user's context"""
+    _clean_expired_context()
+    if user_id not in USER_CONTEXT:
+        USER_CONTEXT[user_id] = []
+    USER_CONTEXT[user_id].append({
+        "role": role,
+        "content": content,
+        "timestamp": datetime.utcnow()
+    })
+    # Keep only last 5 turns
+    USER_CONTEXT[user_id] = USER_CONTEXT[user_id][-10:]
+
+def _get_context_messages(user_id: str) -> List[Dict[str, str]]:
+    """Get recent conversation messages without timestamps"""
+    _clean_expired_context()
+    if user_id not in USER_CONTEXT:
+        return []
+    return [{"role": m["role"], "content": m["content"]} for m in USER_CONTEXT[user_id]]
+
+
+def query_model(user_id: str, prompt: str, model="openai/gpt-oss-20b", url="https://openrouter.ai/api/v1/chat/completions"):
+    """Query the LLM with conversation context"""
     try:
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             raise ValueError("Missing OPENROUTER_API_KEY environment variable")
+
+        # Build message history
+        history = _get_context_messages(user_id)
+        history.append({"role": "user", "content": prompt})
 
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": "You are an expert SQL query generator."},
-                {"role": "user", "content": prompt}
-            ],
+                {"role": "system", "content": "You are an expert SQL query generator. Keep track of user context to interpret follow-up queries correctly."}
+            ] + history,
             "temperature": 0,
             "max_tokens": 1024
         }
@@ -29,7 +93,13 @@ def query_model(prompt, model="openai/gpt-oss-20b", url="https://openrouter.ai/a
         response.raise_for_status()
         data = response.json()
 
-        return data["choices"][0]["message"]["content"].strip()
+        answer = data["choices"][0]["message"]["content"].strip()
+
+        # Store both user input & LLM output
+        _add_to_context(user_id, "user", prompt)
+        _add_to_context(user_id, "assistant", answer)
+
+        return answer
 
     except Exception as e:
         return f"Error querying OpenRouter: {str(e)}"
@@ -45,7 +115,6 @@ def clean_sql_query(sql_query: str, target_db: str) -> str:
     cleaned = re.sub(r'```sql\n?', '', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'```\n?', '', cleaned, flags=re.IGNORECASE)
 
-    # Extract actual SQL (first matching main SQL pattern)
     sql_patterns = [
         r'(SELECT\s+.*?;)',
         r'(INSERT\s+.*?;)',
@@ -62,8 +131,7 @@ def clean_sql_query(sql_query: str, target_db: str) -> str:
             cleaned = match.group(1)
             break
 
-    # Remove DB prefix if it matches target_db
-    db_prefix_pattern = rf'\b{re.escape(target_db)}\.'  # e.g. railway.
+    db_prefix_pattern = rf'\b{re.escape(target_db)}\.'
     cleaned = re.sub(db_prefix_pattern, '', cleaned, flags=re.IGNORECASE)
 
     cleaned = cleaned.rstrip(';').strip() + ';'
@@ -71,7 +139,6 @@ def clean_sql_query(sql_query: str, target_db: str) -> str:
 
 
 def extract_database_preference(user_input: str, available_dbs: List[str]) -> Optional[str]:
-    """Guess which DB to use based on input"""
     user_input_lower = user_input.lower()
     for db_name in available_dbs:
         if db_name.lower() in user_input_lower:
@@ -86,20 +153,21 @@ def extract_database_preference(user_input: str, available_dbs: List[str]) -> Op
 
 
 def build_enhanced_prompt(user_input: str, schema_info: str, available_databases: List[str], preferred_db: Optional[str] = None) -> str:
-    """Builds a context-rich prompt for LLM"""
     prompt = f"""You are an expert SQL query generator with access to multiple PostgreSQL databases.
+The conversation may include follow-up questions referring to previous results.
 
 USER QUESTION: "{user_input}"
 
 {schema_info}
 
 INSTRUCTIONS:
-1. Choose the most relevant database.
-2. DO NOT prefix table names with the database name (e.g., use "teacher" not "railway.teacher").
-3. Use proper JOINs for multiple tables but not in all queries.
-4. Use ILIKE with % for partial matches.
-5. Add LIMIT for large results.
-6. Only output SQL, no explanations.
+1. Use context from earlier conversation to resolve ambiguous references (e.g., "him", "that record").
+2. Choose the most relevant database.
+3. DO NOT prefix table names with the database name.
+4. Use proper JOINs when needed.
+5. Use ILIKE with % for partial matches.
+6. Add LIMIT for large results.
+7. Only output SQL.
 
 DATABASES:
 """
@@ -112,8 +180,7 @@ DATABASES:
     return prompt
 
 
-def generate_sql_response(user_input: str, user_db_credentials: List[ExternalDBCredential], preferred_db_name: Optional[str] = None) -> Dict[str, str]:
-    """Generate SQL query for user"""
+def generate_sql_response(user_id: str, user_input: str, user_db_credentials: List[ExternalDBCredential], preferred_db_name: Optional[str] = None) -> Dict[str, str]:
     if not user_input.strip():
         return {"error": "User input cannot be empty", "sql": "", "database": ""}
 
@@ -121,6 +188,9 @@ def generate_sql_response(user_input: str, user_db_credentials: List[ExternalDBC
         return {"error": "No database connections", "sql": "", "database": ""}
 
     try:
+        cached = get_cached_response(user_id, user_input)
+        if cached:
+            return cached 
         user_schemas = get_user_database_schemas(user_db_credentials)
         if not user_schemas:
             return {"error": "No accessible databases", "sql": "", "database": ""}
@@ -131,11 +201,17 @@ def generate_sql_response(user_input: str, user_db_credentials: List[ExternalDBC
         if not preferred_db_name:
             preferred_db_name = extract_database_preference(user_input, available_dbs)
         if not preferred_db_name:
-            preferred_db_name = available_dbs[0]  # default
+            preferred_db_name = available_dbs[0]
 
         prompt = build_enhanced_prompt(user_input, formatted_schema, available_dbs, preferred_db_name)
-        raw_sql = query_model(prompt)
+        raw_sql = query_model(user_id, prompt)
         clean_sql = clean_sql_query(raw_sql, preferred_db_name)
+        set_cached_response(user_id, user_input,  {
+            "sql": clean_sql,
+            "database": preferred_db_name,
+            "error": "",
+            "available_databases": available_dbs
+        })
 
         return {
             "sql": clean_sql,
@@ -149,7 +225,6 @@ def generate_sql_response(user_input: str, user_db_credentials: List[ExternalDBC
 
 
 def execute_sql_query(sql_query: str, db_credential: ExternalDBCredential, limit: int = 100) -> Dict:
-    """Run SQL query"""
     conn = None
     try:
         conn = get_external_db_connection(db_credential)
