@@ -356,7 +356,6 @@ from llmcall import (
 )
 import logging
 import hashlib
-from cache import get_cache, set_cache
 from cache import find_semantic_cache, store_semantic_cache
 import time
 from fastapi.responses import StreamingResponse
@@ -365,7 +364,7 @@ import asyncio
 import uuid
 from datetime import datetime, timedelta
 from enum import Enum
-
+from cache import EnhancedJSONEncoder
 
 # Task status enumeration
 class TaskStatus(str, Enum):
@@ -827,9 +826,10 @@ async def ask_question_stream(
 
             # Step 5: Store in cache
             store_semantic_cache(current_user.id, request.question, response_payload.model_dump(), 600)
-
+            
             # Final send
-            yield json.dumps({"status": "done", "data": response_payload.model_dump()}) + "\n"
+            # yield json.dumps({"status": "done", "data": response_payload.model_dump()}) + "\n"
+            yield json.dumps({"status": "done", "data": response_payload.model_dump()}, cls=EnhancedJSONEncoder) + "\n"
 
         except Exception as e:
             yield json.dumps({"status": "error", "message": str(e)}) + "\n"

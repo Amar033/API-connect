@@ -5,6 +5,11 @@ from getschemas import get_user_database_schemas, format_schema_for_llm, get_ext
 import requests
 import os
 from datetime import datetime, timedelta
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # === Simple in-memory context store ===
 # key = user_id, value = list of recent conversation turns
@@ -46,6 +51,7 @@ def _clean_expired_context():
     for uid in expired_users:
         del USER_CONTEXT[uid]
 
+# 
 def _add_to_context(user_id: str, role: str, content: str):
     """Append message to user's context"""
     _clean_expired_context()
@@ -56,7 +62,7 @@ def _add_to_context(user_id: str, role: str, content: str):
         "content": content,
         "timestamp": datetime.utcnow()
     })
-    # Keep only last 5 turns
+    # Keep only last 10 turns
     USER_CONTEXT[user_id] = USER_CONTEXT[user_id][-10:]
 
 def _get_context_messages(user_id: str) -> List[Dict[str, str]]:
@@ -75,6 +81,7 @@ def query_model(user_id: str, prompt: str, model="openai/gpt-oss-20b", url="http
             raise ValueError("Missing OPENROUTER_API_KEY environment variable")
 
         # Build message history
+        # Retrieve context from the in-memory store
         history = _get_context_messages(user_id)
         history.append({"role": "user", "content": prompt})
 
@@ -95,7 +102,7 @@ def query_model(user_id: str, prompt: str, model="openai/gpt-oss-20b", url="http
 
         answer = data["choices"][0]["message"]["content"].strip()
 
-        # Store both user input & LLM output
+        # Store both user input & LLM output for context
         _add_to_context(user_id, "user", prompt)
         _add_to_context(user_id, "assistant", answer)
 
@@ -152,9 +159,18 @@ def extract_database_preference(user_input: str, available_dbs: List[str]) -> Op
     return None
 
 
-def build_enhanced_prompt(user_input: str, schema_info: str, available_databases: List[str], preferred_db: Optional[str] = None) -> str:
+def build_enhanced_prompt(user_id: str, user_input: str, schema_info: str, available_databases: List[str], preferred_db: Optional[str] = None) -> str:
+    # Retrieve conversation context for the prompt
+    context_history = _get_context_messages(user_id)
+    formatted_context = "\n".join([f"{m['role']}: {m['content']}" for m in context_history])
+    
     prompt = f"""You are an expert SQL query generator with access to multiple PostgreSQL databases.
 The conversation may include follow-up questions referring to previous results.
+
+CONVERSATION HISTORY:
+---
+{formatted_context}
+---
 
 USER QUESTION: "{user_input}"
 
@@ -168,6 +184,7 @@ INSTRUCTIONS:
 5. Use ILIKE with % for partial matches.
 6. Add LIMIT for large results.
 7. Only output SQL.
+8. For string comparison use LOWER() or UPPER() function to ensure case insensitivity.
 
 DATABASES:
 """
@@ -203,10 +220,14 @@ def generate_sql_response(user_id: str, user_input: str, user_db_credentials: Li
         if not preferred_db_name:
             preferred_db_name = available_dbs[0]
 
-        prompt = build_enhanced_prompt(user_input, formatted_schema, available_dbs, preferred_db_name)
+        # Use the modified build_enhanced_prompt function to include conversation context
+        prompt = build_enhanced_prompt(user_id, user_input, formatted_schema, available_dbs, preferred_db_name)
         raw_sql = query_model(user_id, prompt)
         clean_sql = clean_sql_query(raw_sql, preferred_db_name)
-        set_cached_response(user_id, user_input,  {
+        
+        # This part of the code is responsible for setting the cache
+        # The key for the cache is a tuple of user_id and the question
+        set_cached_response(user_id, user_input, {
             "sql": clean_sql,
             "database": preferred_db_name,
             "error": "",
@@ -239,6 +260,7 @@ def execute_sql_query(sql_query: str, db_credential: ExternalDBCredential, limit
             if sql_query.strip().upper().startswith('SELECT'):
                 columns = [desc[0] for desc in cur.description]
                 rows = cur.fetchall()
+                # You might need to handle Decimal objects here if they're not handled by the database driver
                 return {"data": [dict(zip(columns, row)) for row in rows], "columns": columns, "row_count": len(rows), "error": ""}
             else:
                 conn.commit()
