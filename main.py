@@ -16,12 +16,27 @@ from auth import (
 from routes.dbcredentials import router as db_router
 from routes.llm import router as llm_router
 from routes.llmchat import router as llm_chat_router
-
+from fastapi.middleware.cors import CORSMiddleware
 
 # Create tables
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Database Connection Manager", version="1.0.0")
+
+origins = [
+    "http://localhost:3000", # The origin of your Next.js app
+    "http://localhost:8000",
+    "http://localhost:3001", 
+]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.post("/users/", status_code=status.HTTP_201_CREATED)
 async def create_user(user: UserCreate, db: Session = Depends(get_db)):
