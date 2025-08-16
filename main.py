@@ -17,7 +17,7 @@ from routes.dbcredentials import router as db_router
 from routes.llm import router as llm_router
 from routes.llmchat import router as llm_chat_router
 from fastapi.middleware.cors import CORSMiddleware
-
+# from cache import create_vector_index
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -37,6 +37,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# create_vector_index()
 
 @app.post("/users/", status_code=status.HTTP_201_CREATED)
 async def create_user(user: UserCreate, db: Session = Depends(get_db)):

@@ -73,7 +73,7 @@ def _get_context_messages(user_id: str) -> List[Dict[str, str]]:
     return [{"role": m["role"], "content": m["content"]} for m in USER_CONTEXT[user_id]]
 
 
-def query_model(user_id: str, prompt: str, model="openai/gpt-oss-20b", url="https://openrouter.ai/api/v1/chat/completions"):
+def query_model(user_id: str, prompt: str, model="openai/gpt-oss-20b:free", url="https://openrouter.ai/api/v1/chat/completions"):
     """Query the LLM with conversation context"""
     try:
         api_key = os.getenv("OPENROUTER_API_KEY")
