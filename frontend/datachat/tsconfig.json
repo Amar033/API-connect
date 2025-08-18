@@ -1,0 +1,19 @@
+// {
+//   "files": [],
+//   "references": [
+//     { "path": "./tsconfig.app.json" },
+//     { "path": "./tsconfig.node.json" }
+//   ]
+// }
+
+
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",   // <-- this fixes the error
+    "types": ["vite/client"],
+    "strict": true,
+    "jsx": "react-jsx"
+  }
+}
